@@ -1,0 +1,15 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+open-clip-torch
+transformers
+langchain-groq
+langchain-core
+langchain-community
+langchain-chroma
+langchain-text-splitters
+chromadb
+sentence-transformers
+ddgs
+tavily-python
+beautifulsoup4
+requests
