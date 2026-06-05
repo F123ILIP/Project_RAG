@@ -333,25 +333,29 @@ def answer_care_question_tool(question: str) -> str:
 
 # ── Agent factory ─────────────────────────────────────────────────────────────
 def make_agent():
-    """Creates a fresh LangGraph ReAct agent with the three plant tools."""
-    llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0, groq_api_key=GROQ_API_KEY)
-    system = SystemMessage(content="""You are PlantAI — an AI agent for plant identification and care.
+    """Creates a LangGraph ReAct agent with three plant tools.
 
-Available tools:
-  1. classify_plant_tool   — identify plant from uploaded photo (BioCLIP)
-  2. search_plant_info_tool — fetch care articles & build RAG knowledge base
-  3. answer_care_question_tool — answer care questions via RAG
+    Model: llama-3.3-70b-versatile — znacznie lepszy od 8b w wywoływaniu narzędzi,
+    wciąż dostępny na darmowym tierze Groq (do 1000 req/dzień).
+    """
+    # llama-3.3-70b-versatile: niezawodne tool-calling, darmowy Groq free tier
+    llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0, groq_api_key=GROQ_API_KEY)
+    system = SystemMessage(content="""You are PlantAI — an autonomous AI agent for plant identification and care.
 
-Standard workflow when a NEW photo is uploaded:
-  Step 1: call classify_plant_tool
-  Step 2: call search_plant_info_tool(identified plant name)
-  Step 3: warmly introduce the plant and invite questions
+You have exactly three tools. Use them proactively — do NOT answer from memory alone:
+  1. classify_plant_tool   — ALWAYS call this first when a new image is uploaded
+  2. search_plant_info_tool — ALWAYS call this right after classification (input: plant common name)
+  3. answer_care_question_tool — call this for any care question (watering, light, soil, etc.)
 
-For subsequent care questions: call answer_care_question_tool directly.
-Be concise and practical. Use specific numbers (e.g. "water every 7-10 days").""")
+MANDATORY workflow on image upload (follow strictly, in order):
+  Step 1 → classify_plant_tool()
+  Step 2 → search_plant_info_tool(plant_name from step 1)
+  Step 3 → respond warmly with the plant name and an invitation to ask questions
+
+For care questions in chat: call answer_care_question_tool(question).
+Never skip tool calls. Never answer care questions from memory.""")
     return create_react_agent(llm, [classify_plant_tool, search_plant_info_tool,
                                      answer_care_question_tool], prompt=system)
- 
 
 
 def run_agent_turn(user_msg: str, sess: dict) -> str:
@@ -399,38 +403,44 @@ with st.sidebar:
         st.image(image, use_container_width=True)
 
         if st.button("🔍 Rozpoznaj roślinę", use_container_width=True):
-            # Save to temp file — tool accesses image by path
+            # Zapisz obraz do pliku tymczasowego — narzędzie classify_plant_tool
+            # odczytuje go po ścieżce (tak jak w notatniku sekcja 6)
             with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
                 image.save(tmp.name)
                 st.session_state["_pending_image_path"] = tmp.name
 
-            # Clear previous tool outputs
-            for k in ["_tool_name", "_tool_sci", "_tool_conf", "_tool_top5",
-                       "_tool_vs", "_tool_arts_count"]:
+            # Wyczyść poprzednie wyniki narzędzi
+            for k in ["_tool_name", "_tool_sci", "_tool_conf",
+                       "_tool_top5", "_tool_vs"]:
                 st.session_state.pop(k, None)
 
-            # Create session slot (agent fills it in)
+            # Utwórz slot sesji — agent go wypełni
             new_sess: dict = {
-                "id":             datetime.now().strftime("%H%M%S%f"),
-                "plant_name":     None,
+                "id":              datetime.now().strftime("%H%M%S%f"),
+                "plant_name":      None,
                 "scientific_name": None,
-                "confidence":     None,
-                "messages":       [],
-                "agent_messages": [],   # full LangGraph message history
-                "vectorstore":    None,
-                "timestamp":      datetime.now().strftime("%H:%M"),
-                "top5":           None,
+                "confidence":      None,
+                "messages":        [],
+                "agent_messages":  [],
+                "vectorstore":     None,
+                "timestamp":       datetime.now().strftime("%H:%M"),
+                "top5":            None,
             }
             st.session_state.sessions.insert(0, new_sess)
             st.session_state.active_idx = 0
 
-            # ── Agent runs: classify → search → introduce ──
-            with st.spinner("Agent PlantAI identyfikuje roślinę…"):
-                trigger = ("A new plant image has been uploaded. "
-                           "Please identify it and prepare its care knowledge base.")
+            # ── Agent autonomicznie: klasyfikuje → szuka → odpowiada ──
+            with st.spinner("🤖 Agent PlantAI pracuje…"):
+                trigger = (
+                    "A plant image has just been uploaded by the user. "
+                    "You MUST now: "
+                    "1) call classify_plant_tool to identify the plant, "
+                    "2) call search_plant_info_tool with the identified plant name, "
+                    "3) greet the user and briefly describe the identified plant."
+                )
                 ai_intro = run_agent_turn(trigger, new_sess)
 
-            # Populate session from tool outputs
+            # Pobierz wyniki ustawione przez narzędzia
             if st.session_state.get("_tool_name"):
                 new_sess["plant_name"]      = st.session_state["_tool_name"]
                 new_sess["scientific_name"] = st.session_state["_tool_sci"]
@@ -516,7 +526,7 @@ else:
             if not sess.get("vectorstore"):
                 ans = "Najpierw prześlij zdjęcie i kliknij Rozpoznaj roślinę."
             else:
-                with st.spinner("Agent myśli…"):
+                with st.spinner("🤖 Agent myśli…"):
                     ans = run_agent_turn(q, sess)
             st.markdown(ans)
             sess["messages"].append({"role": "assistant", "content": ans})
