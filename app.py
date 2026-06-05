@@ -13,6 +13,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 from bs4 import BeautifulSoup
 from ddgs import DDGS
 import requests
+from datetime import datetime
 
 GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY", ""))
 TAVILY_API_KEY = st.secrets.get("TAVILY_API_KEY", os.getenv("TAVILY_API_KEY", ""))
@@ -61,13 +62,52 @@ def get_llm():
     )
 
 
+# ── Session state ─────────────────────────────────────────────────────────────
+if "chats" not in st.session_state:
+    st.session_state.chats = {}        # {chat_id: {plant_name, messages, history, vectorstore}}
+if "active_chat" not in st.session_state:
+    st.session_state.active_chat = None
+if "plant_name" not in st.session_state:
+    st.session_state.plant_name = None
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "history" not in st.session_state:
     st.session_state.history = []
-if "plant_name" not in st.session_state:
-    st.session_state.plant_name = None
 if "vectorstore" not in st.session_state:
+    st.session_state.vectorstore = None
+
+
+def save_current_chat():
+    """Zapisuje aktywny czat do historii."""
+    if st.session_state.plant_name and st.session_state.messages:
+        chat_id = st.session_state.active_chat or datetime.now().strftime("%H:%M:%S")
+        st.session_state.chats[chat_id] = {
+            "plant_name": st.session_state.plant_name,
+            "messages": list(st.session_state.messages),
+            "history": list(st.session_state.history),
+            "vectorstore": st.session_state.vectorstore,
+        }
+        st.session_state.active_chat = chat_id
+
+
+def load_chat(chat_id):
+    """Wczytuje wybrany czat."""
+    save_current_chat()
+    chat = st.session_state.chats[chat_id]
+    st.session_state.active_chat = chat_id
+    st.session_state.plant_name = chat["plant_name"]
+    st.session_state.messages = chat["messages"]
+    st.session_state.history = chat["history"]
+    st.session_state.vectorstore = chat["vectorstore"]
+
+
+def new_chat():
+    """Zapisuje stary czat i zaczyna nowy."""
+    save_current_chat()
+    st.session_state.active_chat = None
+    st.session_state.plant_name = None
+    st.session_state.messages = []
+    st.session_state.history = []
     st.session_state.vectorstore = None
 
 
@@ -171,6 +211,8 @@ with st.sidebar:
     st.title("🌿 PlantAI")
     st.caption("Zidentyfikuj roślinę i zapytaj o pielęgnację")
     st.divider()
+
+    # Upload zdjęcia
     uploaded = st.file_uploader(
         "Prześlij zdjęcie rośliny", type=["jpg", "jpeg", "png", "webp"]
     )
@@ -183,12 +225,13 @@ with st.sidebar:
             if name:
                 st.success(f"**{name.title()}** ({conf:.0%})")
                 with st.spinner("Szukam artykułów i buduję bazę wiedzy..."):
+                    # zapisz stary czat i zacznij nowy
+                    new_chat()
                     arts = get_articles(name)
                     vs = build_vs(name, arts)
                     st.session_state.plant_name = name
                     st.session_state.vectorstore = vs
-                    st.session_state.history = []
-                    st.session_state.messages = []
+                    st.session_state.active_chat = name + " " + datetime.now().strftime("%H:%M")
                 st.success(f"Gotowe! Znaleziono {len(arts)} artykułów.")
                 with st.expander("Top-5 predykcji BioCLIP"):
                     for sp, pr in top5.items():
@@ -197,13 +240,34 @@ with st.sidebar:
                 st.error(
                     f"Nie rozpoznano ({conf:.0%}). Spróbuj wyraźniejszego zdjęcia."
                 )
+
+    # Aktywna roślina
     if st.session_state.plant_name:
         st.divider()
         st.info(f"🌱 **{st.session_state.plant_name.title()}**")
-    if st.button("🗑️ Wyczyść czat", use_container_width=True):
+
+    # Historia czatów
+    if st.session_state.chats:
+        st.divider()
+        st.subheader("📋 Historia czatów")
+        for chat_id, chat in st.session_state.chats.items():
+            label = f"🌱 {chat['plant_name'].title()}"
+            is_active = chat_id == st.session_state.active_chat
+            if st.button(
+                label,
+                key=f"chat_{chat_id}",
+                use_container_width=True,
+                disabled=is_active
+            ):
+                load_chat(chat_id)
+                st.rerun()
+
+    st.divider()
+    if st.button("🗑️ Wyczyść aktywny czat", use_container_width=True):
         st.session_state.messages = []
         st.session_state.history = []
         st.rerun()
+
 
 # ── Chat ──────────────────────────────────────────────────────────────────────
 st.title("🌿 PlantAI")
@@ -229,3 +293,4 @@ if q := st.chat_input("Zapytaj o pielęgnację..."):
                 st.session_state.history.append(AIMessage(content=ans))
         st.markdown(ans)
         st.session_state.messages.append({"role": "assistant", "content": ans})
+    save_current_chat()
