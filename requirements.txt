@@ -13,3 +13,4 @@ ddgs
 tavily-python
 beautifulsoup4
 requests
+langgraph>=0.2.0
