@@ -7,8 +7,9 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.messages import HumanMessage, AIMessage
 from bs4 import BeautifulSoup
 from ddgs import DDGS
 import requests
@@ -62,6 +63,8 @@ def get_llm():
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "history" not in st.session_state:
+    st.session_state.history = []
 if "plant_name" not in st.session_state:
     st.session_state.plant_name = None
 if "vectorstore" not in st.session_state:
@@ -142,21 +145,24 @@ def build_vs(plant_name, articles):
     return Chroma.from_documents(chunks, embedding=emb, persist_directory=persist)
 
 
-def get_answer(question, vs, plant_name):
+def get_answer(question, vs, plant_name, history):
     docs = vs.as_retriever(search_kwargs={"k": 2}).invoke(question)
     ctx = "\n\n".join(d.page_content for d in docs)
     prompt = ChatPromptTemplate.from_messages([
         ("system",
          "You are PlantAI, an expert plant care assistant. "
          "Current plant: {plant_name}. "
-         "Be practical and specific. Use exact numbers when available."
+         "Be practical and specific. Use exact numbers when available. "
+         "Use chat history to understand follow-up questions."
          "\n\nContext:\n{context}"),
+        MessagesPlaceholder("history"),
         ("human", "{question}")
     ])
     return (prompt | get_llm() | StrOutputParser()).invoke({
         "context": ctx,
         "plant_name": plant_name,
-        "question": question
+        "question": question,
+        "history": history
     })
 
 
@@ -181,17 +187,22 @@ with st.sidebar:
                     vs = build_vs(name, arts)
                     st.session_state.plant_name = name
                     st.session_state.vectorstore = vs
+                    st.session_state.history = []
+                    st.session_state.messages = []
                 st.success(f"Gotowe! Znaleziono {len(arts)} artykułów.")
                 with st.expander("Top-5 predykcji BioCLIP"):
                     for sp, pr in top5.items():
                         st.progress(pr, text=f"{sp} ({pr:.1%})")
             else:
-                st.error(f"Nie rozpoznano ({conf:.0%}). Spróbuj wyraźniejszego zdjęcia.")
+                st.error(
+                    f"Nie rozpoznano ({conf:.0%}). Spróbuj wyraźniejszego zdjęcia."
+                )
     if st.session_state.plant_name:
         st.divider()
         st.info(f"🌱 **{st.session_state.plant_name.title()}**")
     if st.button("🗑️ Wyczyść czat", use_container_width=True):
         st.session_state.messages = []
+        st.session_state.history = []
         st.rerun()
 
 # ── Chat ──────────────────────────────────────────────────────────────────────
@@ -211,7 +222,10 @@ if q := st.chat_input("Zapytaj o pielęgnację..."):
         else:
             with st.spinner("Szukam odpowiedzi..."):
                 ans = get_answer(
-                    q, st.session_state.vectorstore, st.session_state.plant_name
+                    q, st.session_state.vectorstore,
+                    st.session_state.plant_name, st.session_state.history
                 )
+                st.session_state.history.append(HumanMessage(content=q))
+                st.session_state.history.append(AIMessage(content=ans))
         st.markdown(ans)
         st.session_state.messages.append({"role": "assistant", "content": ans})
