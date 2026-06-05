@@ -6,11 +6,9 @@
 ![BioCLIP](https://img.shields.io/badge/BioCLIP-iNaturalist_10M-2E7D52)
 ![Groq](https://img.shields.io/badge/Groq-llama--3.3--70b-F55036?logo=groq)
 
-Upload a photo of a houseplant → AI identifies the species → chat about how to care for it.
-
 ---
 
-![App screenshot](assets/screenshot.png)
+![App screenshot](app_screenshot.png)
 
 ---
 
