@@ -370,17 +370,22 @@ IMPORTANT: When calling answer_care_question_tool, ALWAYS include the plant_name
                                      answer_care_question_tool], prompt=system)
 
 
-def run_agent_turn(user_msg: str, sess: dict) -> str:
+def run_agent_turn(user_msg: str, sess: dict, keep_history: bool = True) -> str:
     """
-    Runs one conversational turn of the ReAct agent.
-    Maintains full message history in sess['agent_messages'] for multi-turn context.
+    Runs one agent turn.
+    keep_history=True  → identyfikacja (multi-step: classify → search → intro)
+    keep_history=False → Q&A (single-turn, czysta historia — agent nie myli się w poprzednich toolach)
     """
-    agent   = make_agent()
-    history = list(sess.get("agent_messages", [])) + [HumanMessage(content=user_msg)]
+    agent = make_agent()
+    if keep_history:
+        history = list(sess.get("agent_messages", [])) + [HumanMessage(content=user_msg)]
+    else:
+        history = [HumanMessage(content=user_msg)]   # świeży start dla Q&A
     try:
-        result = agent.invoke({"messages": history}, config={"recursion_limit": 10})
-        sess["agent_messages"] = list(result["messages"])
-        # Return the last AI text (skip messages that only have tool_calls)
+        limit  = 15 if keep_history else 6           # Q&A nie potrzebuje wielu kroków
+        result = agent.invoke({"messages": history}, config={"recursion_limit": limit})
+        if keep_history:
+            sess["agent_messages"] = list(result["messages"])
         for msg in reversed(result["messages"]):
             if isinstance(msg, AIMessage) and msg.content:
                 return msg.content
@@ -541,6 +546,6 @@ else:
                 # Wstrzyknij nazwę rośliny do wiadomości — agent przekaże ją do narzędzia
                 agent_msg = f"[Current plant: {sess['plant_name']}] {q}"
                 with st.spinner("🤖 Agent myśli…"):
-                    ans = run_agent_turn(agent_msg, sess)
+                    ans = run_agent_turn(agent_msg, sess, keep_history=False)
             st.markdown(ans)
             sess["messages"].append({"role": "assistant", "content": ans})
