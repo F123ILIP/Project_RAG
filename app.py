@@ -370,22 +370,14 @@ IMPORTANT: When calling answer_care_question_tool, ALWAYS include the plant_name
                                      answer_care_question_tool], prompt=system)
 
 
-def run_agent_turn(user_msg: str, sess: dict, keep_history: bool = True) -> str:
-    """
-    Runs one agent turn.
-    keep_history=True  → identyfikacja (multi-step: classify → search → intro)
-    keep_history=False → Q&A (single-turn, czysta historia — agent nie myli się w poprzednich toolach)
-    """
-    agent = make_agent()
-    if keep_history:
-        history = list(sess.get("agent_messages", [])) + [HumanMessage(content=user_msg)]
-    else:
-        history = [HumanMessage(content=user_msg)]   # świeży start dla Q&A
+def run_agent_turn(user_msg: str, sess: dict) -> str:
+    """Uruchamia agenta dla identyfikacji rośliny (multi-step: classify → search → intro).
+    Dla Q&A używaj bezpośrednio rag_answer() — niezawodne i bez pośrednika."""
+    agent   = make_agent()
+    history = list(sess.get("agent_messages", [])) + [HumanMessage(content=user_msg)]
     try:
-        limit  = 15 if keep_history else 6           # Q&A nie potrzebuje wielu kroków
-        result = agent.invoke({"messages": history}, config={"recursion_limit": limit})
-        if keep_history:
-            sess["agent_messages"] = list(result["messages"])
+        result = agent.invoke({"messages": history}, config={"recursion_limit": 15})
+        sess["agent_messages"] = list(result["messages"])
         for msg in reversed(result["messages"]):
             if isinstance(msg, AIMessage) and msg.content:
                 return msg.content
@@ -540,12 +532,10 @@ else:
         with st.chat_message("assistant"):
             if not sess.get("plant_name"):
                 ans = "Najpierw prześlij zdjęcie i kliknij Rozpoznaj roślinę."
+            elif not sess.get("vectorstore"):
+                ans = "Baza wiedzy jeszcze się buduje, spróbuj za chwilę."
             else:
-                # Aktualizuj kontekst — tool odczyta plant_name z _active_context()
-                _active_context()["plant_name"] = sess["plant_name"]
-                # Wstrzyknij nazwę rośliny do wiadomości — agent przekaże ją do narzędzia
-                agent_msg = f"[Current plant: {sess['plant_name']}] {q}"
-                with st.spinner("🤖 Agent myśli…"):
-                    ans = run_agent_turn(agent_msg, sess, keep_history=False)
+                with st.spinner("Szukam odpowiedzi…"):
+                    ans = rag_answer(q, sess["vectorstore"], sess["plant_name"])
             st.markdown(ans)
             sess["messages"].append({"role": "assistant", "content": ans})
