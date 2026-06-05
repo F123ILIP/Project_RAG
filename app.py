@@ -7,32 +7,85 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.messages import HumanMessage, AIMessage
 from bs4 import BeautifulSoup
 from ddgs import DDGS
 import requests
-from datetime import datetime
 
 GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY", ""))
 TAVILY_API_KEY = st.secrets.get("TAVILY_API_KEY", os.getenv("TAVILY_API_KEY", ""))
 
 st.set_page_config(page_title="PlantAI", page_icon="🌿", layout="wide")
 
+# Każda para: (nazwa potoczna, nazwa naukowa)
+# BioCLIP był trenowany na iNaturalist — nazwy naukowe dają lepsze wyniki
 PLANT_SPECIES = [
-    "monstera deliciosa", "pothos", "snake plant", "peace lily", "spider plant",
-    "rubber plant", "fiddle leaf fig", "aloe vera", "cactus", "succulent",
-    "boston fern", "philodendron", "dracaena", "calathea", "orchid",
-    "african violet", "jade plant", "chinese evergreen", "ZZ plant", "prayer plant",
-    "bird of paradise", "anthurium", "begonia", "bromeliad", "christmas cactus",
-    "croton", "dieffenbachia", "english ivy", "geranium", "hibiscus",
-    "hosta", "hydrangea", "impatiens", "lavender", "lemon tree", "lily",
-    "mint", "palm tree", "pansy", "peperomia", "rose", "rosemary",
-    "schefflera", "sedum", "syngonium", "tradescantia", "umbrella plant",
-    "venus flytrap", "wandering jew", "wisteria", "yucca", "zinnia",
-    "basil", "bamboo", "bonsai", "clivia", "echeveria", "haworthia", "maranta", "oxalis"
+    ("monstera deliciosa",  "Monstera deliciosa"),
+    ("pothos",              "Epipremnum aureum"),
+    ("snake plant",         "Dracaena trifasciata"),
+    ("peace lily",          "Spathiphyllum wallisii"),
+    ("spider plant",        "Chlorophytum comosum"),
+    ("rubber plant",        "Ficus elastica"),
+    ("fiddle leaf fig",     "Ficus lyrata"),
+    ("aloe vera",           "Aloe vera"),
+    ("cactus",              "Cactaceae"),
+    ("succulent",           "Crassulaceae"),
+    ("boston fern",         "Nephrolepis exaltata"),
+    ("philodendron",        "Philodendron hederaceum"),
+    ("dracaena",            "Dracaena marginata"),
+    ("calathea",            "Calathea ornata"),
+    ("orchid",              "Phalaenopsis amabilis"),
+    ("african violet",      "Streptocarpus ionanthus"),
+    ("jade plant",          "Crassula ovata"),
+    ("chinese evergreen",   "Aglaonema commutatum"),
+    ("ZZ plant",            "Zamioculcas zamiifolia"),
+    ("prayer plant",        "Maranta leuconeura"),
+    ("bird of paradise",    "Strelitzia reginae"),
+    ("anthurium",           "Anthurium andraeanum"),
+    ("begonia",             "Begonia rex"),
+    ("bromeliad",           "Guzmania lingulata"),
+    ("christmas cactus",    "Schlumbergera truncata"),
+    ("croton",              "Codiaeum variegatum"),
+    ("dieffenbachia",       "Dieffenbachia seguine"),
+    ("english ivy",         "Hedera helix"),
+    ("geranium",            "Pelargonium hortorum"),
+    ("hibiscus",            "Hibiscus rosa-sinensis"),
+    ("hosta",               "Hosta plantaginea"),
+    ("hydrangea",           "Hydrangea macrophylla"),
+    ("impatiens",           "Impatiens walleriana"),
+    ("lavender",            "Lavandula angustifolia"),
+    ("lemon tree",          "Citrus limon"),
+    ("lily",                "Lilium candidum"),
+    ("mint",                "Mentha spicata"),
+    ("palm tree",           "Arecaceae"),
+    ("pansy",               "Viola tricolor"),
+    ("peperomia",           "Peperomia obtusifolia"),
+    ("rose",                "Rosa hybrida"),
+    ("rosemary",            "Salvia rosmarinus"),
+    ("schefflera",          "Schefflera actinophylla"),
+    ("sedum",               "Sedum spectabile"),
+    ("syngonium",           "Syngonium podophyllum"),
+    ("tradescantia",        "Tradescantia zebrina"),
+    ("umbrella plant",      "Cyperus alternifolius"),
+    ("venus flytrap",       "Dionaea muscipula"),
+    ("wandering jew",       "Tradescantia fluminensis"),
+    ("wisteria",            "Wisteria sinensis"),
+    ("yucca",               "Yucca elephantipes"),
+    ("zinnia",              "Zinnia elegans"),
+    ("basil",               "Ocimum basilicum"),
+    ("bamboo",              "Bambusoideae"),
+    ("bonsai",              "Ficus retusa"),
+    ("clivia",              "Clivia miniata"),
+    ("echeveria",           "Echeveria elegans"),
+    ("haworthia",           "Haworthiopsis attenuata"),
+    ("maranta",             "Maranta leuconeura"),
+    ("oxalis",              "Oxalis triangularis"),
 ]
+
+COMMON_NAMES     = [p[0] for p in PLANT_SPECIES]
+SCIENTIFIC_NAMES = [p[1] for p in PLANT_SPECIES]
+
 CONFIDENCE_THRESHOLD = 0.10
 
 
@@ -62,69 +115,45 @@ def get_llm():
     )
 
 
-# ── Session state ─────────────────────────────────────────────────────────────
-if "chats" not in st.session_state:
-    st.session_state.chats = {}        # {chat_id: {plant_name, messages, history, vectorstore}}
-if "active_chat" not in st.session_state:
-    st.session_state.active_chat = None
-if "plant_name" not in st.session_state:
-    st.session_state.plant_name = None
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "history" not in st.session_state:
-    st.session_state.history = []
-if "vectorstore" not in st.session_state:
-    st.session_state.vectorstore = None
-
-
-def save_current_chat():
-    """Zapisuje aktywny czat do historii."""
-    if st.session_state.plant_name and st.session_state.messages:
-        chat_id = st.session_state.active_chat or datetime.now().strftime("%H:%M:%S")
-        st.session_state.chats[chat_id] = {
-            "plant_name": st.session_state.plant_name,
-            "messages": list(st.session_state.messages),
-            "history": list(st.session_state.history),
-            "vectorstore": st.session_state.vectorstore,
-        }
-        st.session_state.active_chat = chat_id
-
-
-def load_chat(chat_id):
-    """Wczytuje wybrany czat."""
-    save_current_chat()
-    chat = st.session_state.chats[chat_id]
-    st.session_state.active_chat = chat_id
-    st.session_state.plant_name = chat["plant_name"]
-    st.session_state.messages = chat["messages"]
-    st.session_state.history = chat["history"]
-    st.session_state.vectorstore = chat["vectorstore"]
-
-
-def new_chat():
-    """Zapisuje stary czat i zaczyna nowy."""
-    save_current_chat()
-    st.session_state.active_chat = None
+if "plant_name" not in st.session_state:
     st.session_state.plant_name = None
-    st.session_state.messages = []
-    st.session_state.history = []
+if "vectorstore" not in st.session_state:
     st.session_state.vectorstore = None
 
 
 def classify_plant(image):
     model, preprocess, tokenizer = load_bioclip()
-    texts = [s for s in PLANT_SPECIES]
-    tokens = tokenizer(texts)
+
+    # FIX 1: prompt templates zamiast gołych nazw
+    # FIX 2: ensemble nazw potocznych + naukowych
+    # FIX 3: hardkodowane 100.0 zamiast model.logit_scale (stabilniejsze dla BioCLIP)
+    template_groups = [
+        [f"a photo of a {s} plant"  for s in COMMON_NAMES],
+        [f"a photo of {s}"          for s in SCIENTIFIC_NAMES],
+        [f"a houseplant: {s}"       for s in COMMON_NAMES],
+    ]
+
     img_tensor = preprocess(image).unsqueeze(0)
+
     with torch.no_grad():
         img_f = model.encode_image(img_tensor)
-        txt_f = model.encode_text(tokens)
         img_f = img_f / img_f.norm(dim=-1, keepdim=True)
-        txt_f = txt_f / txt_f.norm(dim=-1, keepdim=True)
-        logit_scale = model.logit_scale.exp()
-        probs = (logit_scale * img_f @ txt_f.T).softmax(dim=-1)[0]
-    top5 = {PLANT_SPECIES[i]: round(probs[i].item(), 4) for i in probs.topk(5).indices}
-    best = PLANT_SPECIES[probs.argmax().item()]
+
+        all_probs = []
+        for texts in template_groups:
+            tokens = tokenizer(texts)
+            txt_f  = model.encode_text(tokens)
+            txt_f  = txt_f / txt_f.norm(dim=-1, keepdim=True)
+            probs  = (100.0 * img_f @ txt_f.T).softmax(dim=-1)[0]
+            all_probs.append(probs)
+
+    # Ensemble: uśrednij prawdopodobieństwa ze wszystkich szablonów
+    probs = torch.stack(all_probs).mean(dim=0)
+
+    top5 = {COMMON_NAMES[i]: round(probs[i].item(), 4) for i in probs.topk(5).indices}
+    best = COMMON_NAMES[probs.argmax().item()]
     conf = probs.max().item()
     return (best if conf >= CONFIDENCE_THRESHOLD else None), conf, top5
 
@@ -152,8 +181,8 @@ def get_articles(plant_name):
         return [
             {
                 "title": r.get("title", ""),
-                "url": r.get("url", ""),
-                "text": (r.get("raw_content") or r.get("content", ""))[:5000]
+                "url":   r.get("url", ""),
+                "text":  (r.get("raw_content") or r.get("content", ""))[:5000]
             }
             for r in res.get("results", [])
         ]
@@ -164,14 +193,14 @@ def get_articles(plant_name):
             if text:
                 docs.append({
                     "title": r.get("title", ""),
-                    "url": r.get("href", ""),
-                    "text": text
+                    "url":   r.get("href", ""),
+                    "text":  text
                 })
     return docs
 
 
 def build_vs(plant_name, articles):
-    emb = load_embeddings()
+    emb     = load_embeddings()
     persist = "./chroma_db/" + plant_name.replace(" ", "_")
     if os.path.exists(persist):
         return Chroma(persist_directory=persist, embedding_function=emb)
@@ -185,24 +214,21 @@ def build_vs(plant_name, articles):
     return Chroma.from_documents(chunks, embedding=emb, persist_directory=persist)
 
 
-def get_answer(question, vs, plant_name, history):
-    docs = vs.as_retriever(search_kwargs={"k": 2}).invoke(question)
-    ctx = "\n\n".join(d.page_content for d in docs)
+def get_answer(question, vs, plant_name):
+    docs   = vs.as_retriever(search_kwargs={"k": 2}).invoke(question)
+    ctx    = "\n\n".join(d.page_content for d in docs)
     prompt = ChatPromptTemplate.from_messages([
         ("system",
          "You are PlantAI, an expert plant care assistant. "
          "Current plant: {plant_name}. "
-         "Be practical and specific. Use exact numbers when available. "
-         "Use chat history to understand follow-up questions."
+         "Be practical and specific. Use exact numbers when available."
          "\n\nContext:\n{context}"),
-        MessagesPlaceholder("history"),
         ("human", "{question}")
     ])
     return (prompt | get_llm() | StrOutputParser()).invoke({
-        "context": ctx,
+        "context":    ctx,
         "plant_name": plant_name,
-        "question": question,
-        "history": history
+        "question":   question
     })
 
 
@@ -211,8 +237,6 @@ with st.sidebar:
     st.title("🌿 PlantAI")
     st.caption("Zidentyfikuj roślinę i zapytaj o pielęgnację")
     st.divider()
-
-    # Upload zdjęcia
     uploaded = st.file_uploader(
         "Prześlij zdjęcie rośliny", type=["jpg", "jpeg", "png", "webp"]
     )
@@ -225,49 +249,22 @@ with st.sidebar:
             if name:
                 st.success(f"**{name.title()}** ({conf:.0%})")
                 with st.spinner("Szukam artykułów i buduję bazę wiedzy..."):
-                    # zapisz stary czat i zacznij nowy
-                    new_chat()
                     arts = get_articles(name)
-                    vs = build_vs(name, arts)
-                    st.session_state.plant_name = name
+                    vs   = build_vs(name, arts)
+                    st.session_state.plant_name  = name
                     st.session_state.vectorstore = vs
-                    st.session_state.active_chat = name + " " + datetime.now().strftime("%H:%M")
                 st.success(f"Gotowe! Znaleziono {len(arts)} artykułów.")
                 with st.expander("Top-5 predykcji BioCLIP"):
                     for sp, pr in top5.items():
                         st.progress(pr, text=f"{sp} ({pr:.1%})")
             else:
-                st.error(
-                    f"Nie rozpoznano ({conf:.0%}). Spróbuj wyraźniejszego zdjęcia."
-                )
-
-    # Aktywna roślina
+                st.error(f"Nie rozpoznano ({conf:.0%}). Spróbuj wyraźniejszego zdjęcia.")
     if st.session_state.plant_name:
         st.divider()
         st.info(f"🌱 **{st.session_state.plant_name.title()}**")
-
-    # Historia czatów
-    if st.session_state.chats:
-        st.divider()
-        st.subheader("📋 Historia czatów")
-        for chat_id, chat in st.session_state.chats.items():
-            label = f"🌱 {chat['plant_name'].title()}"
-            is_active = chat_id == st.session_state.active_chat
-            if st.button(
-                label,
-                key=f"chat_{chat_id}",
-                use_container_width=True,
-                disabled=is_active
-            ):
-                load_chat(chat_id)
-                st.rerun()
-
-    st.divider()
-    if st.button("🗑️ Wyczyść aktywny czat", use_container_width=True):
+    if st.button("🗑️ Wyczyść czat", use_container_width=True):
         st.session_state.messages = []
-        st.session_state.history = []
         st.rerun()
-
 
 # ── Chat ──────────────────────────────────────────────────────────────────────
 st.title("🌿 PlantAI")
@@ -286,11 +283,7 @@ if q := st.chat_input("Zapytaj o pielęgnację..."):
         else:
             with st.spinner("Szukam odpowiedzi..."):
                 ans = get_answer(
-                    q, st.session_state.vectorstore,
-                    st.session_state.plant_name, st.session_state.history
+                    q, st.session_state.vectorstore, st.session_state.plant_name
                 )
-                st.session_state.history.append(HumanMessage(content=q))
-                st.session_state.history.append(AIMessage(content=ans))
         st.markdown(ans)
         st.session_state.messages.append({"role": "assistant", "content": ans})
-    save_current_chat()
