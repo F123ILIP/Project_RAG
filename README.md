@@ -8,7 +8,7 @@
 
 ---
 
-![App screenshot](app_screenshot.png)
+![App screenshot](app.png)
 
 ---
 
