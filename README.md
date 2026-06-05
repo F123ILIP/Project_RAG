@@ -38,28 +38,6 @@ A **LangGraph ReAct agent** orchestrates the identification pipeline autonomousl
 
 ---
 
-## Quickstart
-
-```bash
-git clone https://github.com/your-username/plantai
-cd plantai
-pip install -r requirements.txt
-```
-
-Add your API keys to `.streamlit/secrets.toml`:
-```toml
-GROQ_API_KEY = "..."
-TAVILY_API_KEY = ""   # optional — DuckDuckGo works without it
-```
-
-```bash
-streamlit run app.py
-```
-
-> **Free to run.** BioCLIP and embeddings run locally. Groq free tier covers 14 400 requests/day.
-
----
-
 ## Features
 
 - 🔍 **Zero-shot plant recognition** — no training data needed, ensemble of 3 prompt formats
