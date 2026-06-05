@@ -157,6 +157,10 @@ SCIENTIFIC_NAMES = [p[1] for p in PLANT_SPECIES]
 TAXON_STRINGS    = [p[2] for p in PLANT_SPECIES]
 CONFIDENCE_THRESHOLD = 0.10
 
+# Wyniki narzędzi agenta — zwykły słownik modułowy (nie st.session_state)
+# st.session_state jest niedostępny wewnątrz toolów LangGraph (inny wątek/kontekst)
+_agent_results: dict = {}
+
 
 # ── Model loading ─────────────────────────────────────────────────────────────
 @st.cache_resource
@@ -270,29 +274,28 @@ def rag_answer(question: str, vs, plant_name: str) -> str:
 # Agent (LangGraph ReAct) samodzielnie decyduje, które wywołać i w jakiej kolejności.
 
 @tool
-def classify_plant_tool(dummy: str = "") -> str:
-    """Identifies the plant species from the uploaded photo using the BioCLIP vision model.
-    Call this when the user wants to identify a plant from a photo.
-    The image must be uploaded via the sidebar first."""
-    path = st.session_state.get("_pending_image_path")
-    if not path or not os.path.exists(path):
-        return "No image available. The user must upload a photo in the sidebar first."
+def classify_plant_tool(image_path: str) -> str:
+    """Identifies the plant species from an image file using BioCLIP.
+    Input: absolute path to the image file (provided in the task message).
+    Always call this first when a new plant image is available."""
+    if not image_path or not os.path.exists(image_path):
+        return f"Image file not found: '{image_path}'. Check if the path is correct."
     try:
-        image = Image.open(path).convert("RGB")
+        image = Image.open(image_path).convert("RGB")
     except Exception as e:
-        return f"Error loading image: {e}"
+        return f"Error opening image: {e}"
     name, conf, top5, sci = classify_plant_image(image)
     if name:
-        # Store results for session creation after agent finishes
-        st.session_state["_tool_name"] = name
-        st.session_state["_tool_sci"]  = sci
-        st.session_state["_tool_conf"] = conf
-        st.session_state["_tool_top5"] = top5
+        # Zapisz wyniki do słownika modułowego (dostępny z każdego wątku)
+        _agent_results["plant_name"] = name
+        _agent_results["sci"]        = sci
+        _agent_results["conf"]       = conf
+        _agent_results["top5"]       = top5
         top3 = ", ".join(f"{k} ({v:.1%})" for k, v in list(top5.items())[:3])
         return (f"Plant identified: {name.title()} ({sci})\n"
                 f"Confidence: {conf:.0%}\nTop-3: {top3}")
     else:
-        return f"Could not identify plant (confidence too low: {conf:.0%}). Ask the user for a clearer photo."
+        return f"Could not identify plant (confidence too low: {conf:.0%})."
 
 
 @tool
@@ -304,8 +307,8 @@ def search_plant_info_tool(plant_name: str) -> str:
     if not arts:
         return f"No articles found for '{plant_name}'. Try a more common name."
     vs = build_vs(plant_name, arts)
-    st.session_state["_tool_vs"]         = vs
-    st.session_state["_tool_arts_count"] = len(arts)
+    _agent_results["vectorstore"] = vs
+    _agent_results["arts_count"]  = len(arts)
     return (f"Knowledge base built for '{plant_name}': "
             f"{len(arts)} articles, chunked and indexed in ChromaDB.")
 
@@ -315,19 +318,21 @@ def answer_care_question_tool(question: str) -> str:
     """Answers plant care questions using the RAG knowledge base (ChromaDB + LLM).
     Use for questions about watering, light, soil, fertilizing, propagation, common problems.
     Requires the knowledge base to be built first via search_plant_info_tool."""
-    # 1. Check active session's vectorstore
-    idx      = st.session_state.get("active_idx")
-    sessions = st.session_state.get("sessions", [])
-    vs, plant_name = None, "the plant"
-    if idx is not None and 0 <= idx < len(sessions):
-        vs         = sessions[idx].get("vectorstore")
-        plant_name = sessions[idx].get("plant_name", "the plant") or "the plant"
-    # 2. Fall back to temp vectorstore (during initial identification run)
+    # 1. Sprawdź słownik modułowy (zawsze dostępny, niezależnie od wątku)
+    vs         = _agent_results.get("vectorstore")
+    plant_name = _agent_results.get("plant_name", "the plant") or "the plant"
+    # 2. Fallback: st.session_state (działa gdy agent w tym samym wątku)
     if vs is None:
-        vs         = st.session_state.get("_tool_vs")
-        plant_name = st.session_state.get("_tool_name", "the plant") or "the plant"
+        try:
+            idx      = st.session_state.get("active_idx")
+            sessions = st.session_state.get("sessions", [])
+            if idx is not None and 0 <= idx < len(sessions):
+                vs         = sessions[idx].get("vectorstore")
+                plant_name = sessions[idx].get("plant_name", "the plant") or "the plant"
+        except Exception:
+            pass
     if vs is None:
-        return "No knowledge base available yet. Call search_plant_info_tool first."
+        return "No knowledge base available yet. Please identify a plant first."
     return rag_answer(question, vs, plant_name)
 
 
@@ -403,16 +408,15 @@ with st.sidebar:
         st.image(image, use_container_width=True)
 
         if st.button("🔍 Rozpoznaj roślinę", use_container_width=True):
-            # Zapisz obraz do pliku tymczasowego — narzędzie classify_plant_tool
-            # odczytuje go po ścieżce (tak jak w notatniku sekcja 6)
+            # Zapisz obraz do pliku tymczasowego
+            # Ścieżka przekazywana jako argument narzędzia (nie przez session_state)
             with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-                image.save(tmp.name)
-                st.session_state["_pending_image_path"] = tmp.name
+                img_path = tmp.name
+            image.save(img_path)   # zapisz po zamknięciu tmp (unika blokady pliku)
+            st.session_state["_pending_image_path"] = img_path  # backup dla chatu
 
             # Wyczyść poprzednie wyniki narzędzi
-            for k in ["_tool_name", "_tool_sci", "_tool_conf",
-                       "_tool_top5", "_tool_vs"]:
-                st.session_state.pop(k, None)
+            _agent_results.clear()
 
             # Utwórz slot sesji — agent go wypełni
             new_sess: dict = {
@@ -432,21 +436,20 @@ with st.sidebar:
             # ── Agent autonomicznie: klasyfikuje → szuka → odpowiada ──
             with st.spinner("🤖 Agent PlantAI pracuje…"):
                 trigger = (
-                    "A plant image has just been uploaded by the user. "
-                    "You MUST now: "
-                    "1) call classify_plant_tool to identify the plant, "
-                    "2) call search_plant_info_tool with the identified plant name, "
-                    "3) greet the user and briefly describe the identified plant."
+                    f"A plant image has been saved to: '{img_path}'. "
+                    f"Step 1: call classify_plant_tool with image_path='{img_path}'. "
+                    "Step 2: call search_plant_info_tool(plant_name) with the result. "
+                    "Step 3: greet the user and introduce the identified plant."
                 )
                 ai_intro = run_agent_turn(trigger, new_sess)
 
-            # Pobierz wyniki ustawione przez narzędzia
-            if st.session_state.get("_tool_name"):
-                new_sess["plant_name"]      = st.session_state["_tool_name"]
-                new_sess["scientific_name"] = st.session_state["_tool_sci"]
-                new_sess["confidence"]      = st.session_state["_tool_conf"]
-                new_sess["top5"]            = st.session_state["_tool_top5"]
-                new_sess["vectorstore"]     = st.session_state.get("_tool_vs")
+            # Pobierz wyniki z modułowego słownika (ustawionego przez narzędzia agenta)
+            if _agent_results.get("plant_name"):
+                new_sess["plant_name"]      = _agent_results["plant_name"]
+                new_sess["scientific_name"] = _agent_results["sci"]
+                new_sess["confidence"]      = _agent_results["conf"]
+                new_sess["top5"]            = _agent_results["top5"]
+                new_sess["vectorstore"]     = _agent_results.get("vectorstore")
                 new_sess["messages"].append({"role": "assistant", "content": ai_intro})
                 st.success(
                     f"**{new_sess['plant_name'].title()}** · "
