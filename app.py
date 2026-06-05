@@ -161,6 +161,11 @@ CONFIDENCE_THRESHOLD = 0.10
 # st.session_state jest niedostępny wewnątrz toolów LangGraph (inny wątek/kontekst)
 _agent_results: dict = {}
 
+@st.cache_resource
+def _active_context() -> dict:
+    """Persystuje między rerunami Streamlit — przechowuje aktywną roślinę dla toolów."""
+    return {"plant_name": None}
+
 
 # ── Model loading ─────────────────────────────────────────────────────────────
 @st.cache_resource
@@ -309,31 +314,32 @@ def search_plant_info_tool(plant_name: str) -> str:
     vs = build_vs(plant_name, arts)
     _agent_results["vectorstore"] = vs
     _agent_results["arts_count"]  = len(arts)
+    _active_context()["plant_name"] = plant_name   # persystuje między rerunami
     return (f"Knowledge base built for '{plant_name}': "
             f"{len(arts)} articles, chunked and indexed in ChromaDB.")
 
 
 @tool
-def answer_care_question_tool(question: str) -> str:
+def answer_care_question_tool(question: str, plant_name: str = "") -> str:
     """Answers plant care questions using the RAG knowledge base (ChromaDB + LLM).
-    Use for questions about watering, light, soil, fertilizing, propagation, common problems.
-    Requires the knowledge base to be built first via search_plant_info_tool."""
-    # 1. Sprawdź słownik modułowy (zawsze dostępny, niezależnie od wątku)
-    vs         = _agent_results.get("vectorstore")
-    plant_name = _agent_results.get("plant_name", "the plant") or "the plant"
-    # 2. Fallback: st.session_state (działa gdy agent w tym samym wątku)
-    if vs is None:
-        try:
-            idx      = st.session_state.get("active_idx")
-            sessions = st.session_state.get("sessions", [])
-            if idx is not None and 0 <= idx < len(sessions):
-                vs         = sessions[idx].get("vectorstore")
-                plant_name = sessions[idx].get("plant_name", "the plant") or "the plant"
-        except Exception:
-            pass
-    if vs is None:
-        return "No knowledge base available yet. Please identify a plant first."
-    return rag_answer(question, vs, plant_name)
+    Use for ANY question about plant care: watering, light, soil, fertilizing, problems.
+    Args:
+      question:   the user's care question
+      plant_name: the plant's common name (e.g. 'haworthia') — always pass this!"""
+    # Ustal nazwę rośliny: argument → _active_context (persystuje) → _agent_results
+    name = (plant_name.strip()
+            or _active_context().get("plant_name")
+            or _agent_results.get("plant_name")
+            or "")
+    if not name:
+        return "Unknown plant. Please provide plant_name argument or identify the plant first."
+    # Załaduj bazę wiedzy z dysku (Chroma persystuje — zawsze dostępna po pierwszym budowaniu)
+    persist = "./chroma_db/" + name.replace(" ", "_")
+    if not os.path.exists(persist):
+        return (f"No knowledge base for '{name}'. "
+                f"Call search_plant_info_tool('{name}') first to build it.")
+    vs = Chroma(persist_directory=persist, embedding_function=load_embeddings())
+    return rag_answer(question, vs, name)
 
 
 # ── Agent factory ─────────────────────────────────────────────────────────────
@@ -358,7 +364,8 @@ MANDATORY workflow on image upload (follow strictly, in order):
   Step 3 → respond warmly with the plant name and an invitation to ask questions
 
 For care questions in chat: call answer_care_question_tool(question).
-Never skip tool calls. Never answer care questions from memory.""")
+Never skip tool calls. Never answer care questions from memory.
+IMPORTANT: When calling answer_care_question_tool, ALWAYS include the plant_name argument.""")
     return create_react_agent(llm, [classify_plant_tool, search_plant_info_tool,
                                      answer_care_question_tool], prompt=system)
 
@@ -526,10 +533,14 @@ else:
         with st.chat_message("user"):
             st.markdown(q)
         with st.chat_message("assistant"):
-            if not sess.get("vectorstore"):
+            if not sess.get("plant_name"):
                 ans = "Najpierw prześlij zdjęcie i kliknij Rozpoznaj roślinę."
             else:
+                # Aktualizuj kontekst — tool odczyta plant_name z _active_context()
+                _active_context()["plant_name"] = sess["plant_name"]
+                # Wstrzyknij nazwę rośliny do wiadomości — agent przekaże ją do narzędzia
+                agent_msg = f"[Current plant: {sess['plant_name']}] {q}"
                 with st.spinner("🤖 Agent myśli…"):
-                    ans = run_agent_turn(q, sess)
+                    ans = run_agent_turn(agent_msg, sess)
             st.markdown(ans)
             sess["messages"].append({"role": "assistant", "content": ans})
