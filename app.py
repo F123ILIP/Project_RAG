@@ -350,7 +350,8 @@ Standard workflow when a NEW photo is uploaded:
 For subsequent care questions: call answer_care_question_tool directly.
 Be concise and practical. Use specific numbers (e.g. "water every 7-10 days").""")
     return create_react_agent(llm, [classify_plant_tool, search_plant_info_tool,
-                                     answer_care_question_tool], state_modifier=system)
+                                     answer_care_question_tool], prompt=system)
+ 
 
 
 def run_agent_turn(user_msg: str, sess: dict) -> str:
